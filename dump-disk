@@ -1,0 +1,17 @@
+#!/bin/bash -
+cmdline=$(echo $@ | sed 's/dd//')
+tmpfile=$(mktemp)
+
+#dd if=/dev/zero of=test.iso bs=8192 count=100000 > $tmpfile 2>&1 &
+dd $cmdline > $tmpfile 2>&1 &
+pid=$!
+
+while ps --no-headers $pid > /dev/null
+do
+   kill -USR1 $pid
+   echo -ne "\e[1K\r$(tail -1 $tmpfile)"
+   sleep .5
+done
+
+echo -ne "\e[1K\r$(tail -1 $tmpfile) .... complete!\n"
+rm -f $tmpfile
