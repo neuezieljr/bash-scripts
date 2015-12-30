@@ -1,0 +1,248 @@
+#!/bin/bash
+DISTRO=$(lsb_release -cs)
+CHROOTDIR=$(mktemp -d)
+PROFILE=
+ARCH=
+OUTPUT=
+VARIANT=buildd
+
+error()
+{
+    exit 0
+}
+
+trap error TERM INT HUP EXIT QUIT
+
+parse_common_options()
+{
+    while [ "$1" ]; do
+        case "$1" in
+            --arch)
+                shift
+                ARCH=$1
+                ;;
+            --distro)
+                shift
+                DISTRO=$1
+                ;;
+            --output)
+                shift
+                OUTPUT=$1
+        esac
+        shift
+    done
+}
+
+create_base_chroot_env()
+{
+    sudo debootstrap --variant=$VARIANT --arch $ARCH --include=software-properties-common $DISTRO $CHROOTDIR
+
+    cat << EOF_APT | sudo tee $CHROOTDIR/etc/apt/sources.list
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO main restricted
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO main restricted
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO universe
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO universe
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO multiverse
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO-updates main restricted
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO-updates main restricted
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO-updates universe
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO-updates universe
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO-updates multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO-updates multiverse
+EOF_APT
+}
+
+create_pcsx2_chroot_env()
+{
+    PROFILE=pcsx2
+    ARCH=i386
+    OUTPUT=${PROFILE}.tgz
+    PPA="ppa:gregory-hainaut/pcsx2.official.ppa"
+
+    while [ "$1" ]; do
+        case "$1" in
+            --daily)
+                echo -e "\nUse PCSX2 Daily PPA: ppa:pcsx2-team/pcsx2-daily\n"
+                PPA="ppa:pcsx2-team/pcsx2-daily"
+        esac 
+        shift
+    done
+
+    echo '======================='
+    echo 'Create PCSX2 chroot env'
+    echo '     DISTRO =' $DISTRO
+    echo '     ARCH   =' $ARCH
+    echo '     OUTPUT =' $PWD/$OUTPUT
+    echo '  PCSX2 PPA =' $PPA
+    echo '======================='
+    echo
+
+    create_base_chroot_env
+
+    cat << EOF_CONF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
+[$PROFILE]
+description=Ubuntu Gamebox for PCSX2
+directory=$CHROOTDIR
+root-users=$USER
+type=directory
+users=$USER
+EOF_CONF
+
+    cat << EOS | schroot -c $PROFILE -u root -- sh
+export DEBCONF_FRONTEND='noninteractive'
+add-apt-repository $PPA --yes
+apt-get update
+apt-get install libcanberra-gtk-module --yes
+apt-get install pcsx2-unstable --yes
+EOS
+
+    # Install GFX drivers if we have nvidia or amd graphics
+    while read v d; do
+        [ $v == '1002' ] && \
+            GFX=$(echo $GFX fglrx)
+        [ $v == '10de' ] && \
+            GFX=$(echo $GFX nvidia)
+    done < <(lspci -n | awk '{ if ($2 ~ /^03/) print $3 }' | sed 's/:/ /')
+
+    if [ "$GFX" != "" ]; then
+        TMPLIST=$(mktemp -u)
+        ubuntu-drivers list > $TMPLIST
+        for gfx in $GFX; do
+            g=$(cat $TMPLIST | grep $gfx | sort -r | head -1)
+            [ "$g" != "" ] && INSTALL_GFX=$(echo $INSTALL_GFX $g)
+        done
+        schroot -c $PROFILE -u root -- sh -c "export DEBCONF_FRONTEND='noninteractive'; apt-get install $INSTALL_GFX --yes"
+        rm -f $TMPLIST
+    fi
+
+    sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
+    sudo tar -czp --numeric-owner -f $OUTPUT -C $CHROOTDIR .
+    sudo chown $USER $OUTPUT
+    sudo rm -fr $CHROOTDIR
+
+    # create runner script
+    cat > $HOME/run-pcsx2 << EOF_SH
+#!/bin/sh -
+CHROOTDIR=\$(mktemp -d)
+sudo tar -zxp -f $OUTPUT -C \$CHROOTDIR
+
+cat << EOF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
+[$PROFILE]
+description=Ubuntu Gamebox for PCSX2
+directory=\$CHROOTDIR
+root-users=\$USER
+type=directory
+users=\$USER
+EOF
+
+xhost +LOCAL:
+schroot -c pcsx2 -u \$USER -- sh -c "DISPLAY=:0.0 /usr/games/PCSX2-linux.sh"
+sudo rm -fr \$CHROOTDIR
+sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
+EOF_SH
+}
+
+create_ibs_chroot_env()
+{
+    PROFILE=ibs
+    OUTPUT=${PROFILE}.tgz
+    ARCH=amd64
+    DISTRO=precise
+
+    while [ "$1" ]; do
+        case "$1" in
+            --ppa)
+                shift
+                OEM_SOLUTIONS_CDIMAGE_PPA=$1
+                ;;
+            --ppa-key)
+                shift
+                OEM_SOLUTIONS_CDIMAGE_KEY=$1
+                ;;
+        esac
+        shift
+    done
+
+    echo '============================='
+    echo 'Create IBS Builder chroot env'
+    echo '  DISTRO =' $DISTRO
+    echo '  ARCH   =' $ARCH
+    echo '  OUTPUT =' $PWD/$OUTPUT
+    echo '============================='
+    echo
+
+    PROFILE=ibs-${DISTRO}-${ARCH}
+    OUTPUT=${PROFILE}.tgz
+
+    create_base_chroot_env
+
+    cat << EOF_CONF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
+[$PROFILE]
+description=Ubuntu $PROFILE IBS Build env
+directory=$CHROOTDIR
+root-users=$USER
+type=directory
+users=$USER
+EOF_CONF
+
+    if [ "$OEM_SOLUTIONS_CDIMAGE_PPA" = "" ]; then
+        echo "Please enter oem-solutions-cdimage PPA list"
+        echo " e.g. deb https://<user>:<pass>@private-ppa.launchpad.net/oem-solutions-cdimage/oem-lh2/ubuntu precise main"
+        read -p "IBS Tools private PPA: " _ppa
+        export OEM_SOLUTIONS_CDIMAGE_PPA="$_ppa"
+        read -p "IBS Tools private SIGNING KEY: " _key
+        export OEM_SOLUTIONS_CDIMAGE_KEY="$_key"
+    fi
+
+    if [ "$OEM_SOLUTIONS_CDIMAGE_KEY" = "" ]; then
+        echo "Please enter oem-solutions-cdimage PPA list"
+        echo " e.g.  8968243C"
+        read -p "IBS Tools private SIGNING KEY: " _key
+        export OEM_SOLUTIONS_CDIMAGE_KEY="$_key"
+    fi
+
+    cat << EOF_PPA | sudo tee $CHROOTDIR/etc/apt/sources.list.d/oem-lh2.list
+$(echo $OEM_SOLUTIONS_CDIMAGE_PPA)
+EOF_PPA
+
+    cat << EOS | schroot -c $PROFILE -u root -- sh
+apt-get install apt-transport-https apt-utils --yes
+apt-key adv --keyserver keyserver.ubuntu.com --recv $OEM_SOLUTIONS_CDIMAGE_KEY
+apt-get update
+apt-get install live-build=2.0.12-2cesg27-0~1625~ubuntu12.04.1 --yes
+EOS
+    sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
+    sudo tar -czp --numeric-owner -f $OUTPUT -C $CHROOTDIR .
+    sudo chown $USER $OUTPUT
+    sudo rm -fr $CHROOTDIR
+}
+
+usage()
+{
+    echo "${0##*/} [command] <options>"
+    exit 0
+}
+
+for o in $@; do
+    [[ $o =~ ^(-h|--help)$ ]] && usage
+    [[ $o =~ ^(-d|--debug)$ ]] && set -x
+done
+
+_command=
+_options=${@:2}
+case "$1" in
+    ibs)    _command=create_ibs_chroot_env ;;
+    pcsx2)  _command=create_pcsx2_chroot_env ;;
+    *) echo "Invalid command $1, terminate" ; exit 0 ;;
+esac
+
+parse_common_options $_options
+$_command $_options
+
+trap - TERM INT HUP EXIT QUIT
