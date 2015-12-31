@@ -132,6 +132,13 @@ EOS
 CHROOTDIR=\$(mktemp -d)
 sudo tar -zxp -f $OUTPUT -C \$CHROOTDIR
 
+for dev in /dev/input/event*; do
+    if udevadm info $dev | grep -q ID_INPUT_JOYSTICK; then
+        SDL_JOYSTICK_DEVICE=$dev
+        break
+    fi
+done
+
 cat << EOF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
 [$PROFILE]
 description=Ubuntu Gamebox for PCSX2
@@ -142,7 +149,12 @@ users=\$USER
 EOF
 
 xhost +LOCAL:
-schroot -c pcsx2 -u \$USER -- sh -c "DISPLAY=:0.0 /usr/games/PCSX2-linux.sh"
+cat << EOS | schroot -c pcsx2 -u \$USER -- sh
+export DISPLAY=:0.0
+$([ "$SDL_JOYSTICK_DEVICE" != "" ] && echo "export SDL_JOYSTICK_DEVICE=$SDL_JOYSTICK_DEVICE")
+/usr/games/PCSX2-linux.sh
+EOS
+
 sudo rm -fr \$CHROOTDIR
 sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
 EOF_SH
