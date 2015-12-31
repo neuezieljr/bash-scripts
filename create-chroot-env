@@ -224,7 +224,7 @@ $(echo $OEM_SOLUTIONS_CDIMAGE_PPA)
 EOF_PPA
 
     cat << EOS | schroot -c $PROFILE -u root -- sh
-apt-get install apt-transport-https apt-utils --yes
+apt-get install apt-transport-https apt-utils mtools --yes
 apt-key adv --keyserver keyserver.ubuntu.com --recv $OEM_SOLUTIONS_CDIMAGE_KEY
 apt-get update
 apt-get install live-build=2.0.12-2cesg27-0~1625~ubuntu12.04.1 --yes
