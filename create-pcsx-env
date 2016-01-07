@@ -1,0 +1,195 @@
+#!/bin/bash
+DISTRO=$(lsb_release -cs)
+CHROOTDIR=$(mktemp -d)
+PROFILE=
+ARCH=
+OUTPUT=
+VARIANT=buildd
+
+error()
+{
+    exit 0
+}
+
+trap error TERM INT HUP EXIT QUIT
+
+parse_common_options()
+{
+    while [ "$1" ]; do
+        case "$1" in
+            --arch)
+                shift
+                ARCH=$1
+                ;;
+            --distro)
+                shift
+                DISTRO=$1
+                ;;
+            --output)
+                shift
+                OUTPUT=$1
+        esac
+        shift
+    done
+}
+
+create_base_chroot_env()
+{
+    sudo debootstrap --variant=$VARIANT --arch $ARCH --include=software-properties-common $DISTRO $CHROOTDIR
+
+    cat << EOF_APT | sudo tee $CHROOTDIR/etc/apt/sources.list
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO main restricted
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO main restricted
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO universe
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO universe
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO multiverse
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO-updates main restricted
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO-updates main restricted
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO-updates universe
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO-updates universe
+
+deb http://archive.ubuntu.com/ubuntu/ $DISTRO-updates multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ $DISTRO-updates multiverse
+EOF_APT
+}
+
+create_pcsx2_chroot_env()
+{
+    PROFILE=pcsx2
+    ARCH=i386
+    OUTPUT=${PROFILE}.tgz
+    PPA="ppa:gregory-hainaut/pcsx2.official.ppa"
+
+    while [ "$1" ]; do
+        case "$1" in
+            --daily)
+                echo -e "\nUse PCSX2 Daily PPA: ppa:pcsx2-team/pcsx2-daily\n"
+                PPA="ppa:pcsx2-team/pcsx2-daily"
+        esac 
+        shift
+    done
+
+    echo '======================='
+    echo 'Create PCSX2 chroot env'
+    echo '     DISTRO =' $DISTRO
+    echo '     ARCH   =' $ARCH
+    echo '     OUTPUT =' $PWD/$OUTPUT
+    echo '  PCSX2 PPA =' $PPA
+    echo '======================='
+    echo
+
+    create_base_chroot_env
+
+    cat << EOF_CONF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
+[$PROFILE]
+description=Ubuntu Gamebox for PCSX2
+directory=$CHROOTDIR
+root-users=$USER
+type=directory
+users=$USER
+EOF_CONF
+
+    cat << EOS | schroot -c $PROFILE -u root -- sh
+export DEBCONF_FRONTEND='noninteractive'
+add-apt-repository $PPA --yes
+apt-get update
+apt-get install libcanberra-gtk-module --yes
+apt-get install pcsx2-unstable --yes
+EOS
+
+    while read line; do
+        case "$line" in
+            nvidia-[0-9]*) GFX_DPKG=$line ;;
+            fglrx|fglrx-updates) GFX_DPKG=$(echo $line ${line}-core);;
+        esac
+    done < <(dpkg -l | grep -E "(nvidia|fglrx)" | awk '{print $2}')
+
+    if [[ $GFX_DPKG != '' ]]; then
+        GFX_DPKG_VER=$(dpkg-query -W -f='${Version}\n' $GFX_DPKG | head -1)
+
+        if [[ $GFX_DPKG =~ nvidia.* ]]; then
+            UPALT_OPT="--install /etc/ld.so.conf.d/i386-linux-gnu_GL.conf i386-linux-gnu_gl_conf /usr/lib/${GFX_DPKG}/ld.so.conf 9999 \
+                       --slave /usr/lib/xorg/modules/drivers/nvidia_drv.so i386-linux-gnu_nvidia_drv /usr/lib/${GFX_DPKG}/xorg/nvidia_drv.so \
+                       --slave /usr/lib/i386-linux-gnu/xorg/extra-modules i386-linux-gnu_xorg_extra_modules /usr/lib/${GFX_DPKG}/xorg \
+                       --slave /usr/lib/vdpau/libvdpau_nvidia.so.1 i386-linux-gnu_libvdpau_nvidia.so.1 /usr/lib/${GFX_DPKG}/vdpau/libvdpau_nvidia.so.1 \
+                       --slave /usr/lib/libvdpau_nvidia.so i386-linux-gnu_libvdpau_nvidia.so /usr/lib/${GFX_DPKG}/vdpau/libvdpau_nvidia.so"
+        fi
+
+        if [[ $GFX_DPKG =~ fglrx.* ]]; then
+            UPALT_OPT="--install /etc/ld.so.conf.d/i386-linux-gnu_GL.conf i386-linux-gnu_gl_conf /usr/lib/fglrx/ld.so.conf 9999 \
+                       --slave /usr/lib/xorg/modules/drivers/fglrx_drv.so i386-linux-gnu_fglrx_drv /usr/lib/fglrx/xorg/modules/drivers/fglrx_drv.so \
+                       --slave /usr/lib/i386-linux-gnu/xorg/extra-modules i386-linux-gnu_xorg_extra_modules /usr/lib/fglrx/xorg"
+        fi
+
+        cat << EOS | schroot -c $PROFILE -u root -- sh
+for drv in $GFX_DPKG; do
+  apt-get download \$drv=$GFX_DPKG_VER
+  dpkg -x \${drv}*.deb /
+done
+update-alternatives --force $UPALT_OPT
+ldconfig
+rm -f ${GFX_DPKG}*.deb
+EOS
+    fi
+
+    sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
+    sudo tar -czp --numeric-owner -f $OUTPUT -C $CHROOTDIR .
+    sudo chown $USER $OUTPUT
+    sudo rm -fr $CHROOTDIR
+
+    # create runner script
+    cat > $HOME/run-pcsx2 << EOF_SH
+#!/bin/sh -
+CHROOTDIR=\$(mktemp -d)
+sudo tar -zxp -f $OUTPUT -C \$CHROOTDIR
+
+for dev in /dev/input/event*; do
+    if udevadm info \$dev | grep -q ID_INPUT_JOYSTICK; then
+        SDL_JOYSTICK_DEVICE=\$dev
+        break
+    fi
+done
+
+cat << EOF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
+[$PROFILE]
+description=Ubuntu Gamebox for PCSX2
+directory=\$CHROOTDIR
+root-users=\$USER
+type=directory
+users=\$USER
+EOF
+
+xhost +LOCAL:
+cat << EOS | schroot -c pcsx2 -u \$USER -- sh
+export DISPLAY=:0.0
+$([ "$SDL_JOYSTICK_DEVICE" != "" ] && echo "export SDL_JOYSTICK_DEVICE=$SDL_JOYSTICK_DEVICE")
+/usr/games/PCSX2-linux.sh
+EOS
+
+sudo rm -fr \$CHROOTDIR
+sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
+EOF_SH
+   chmod u+x $HOME/run-pcsx2
+}
+
+usage()
+{
+    echo "${0##*/} [command] <options>"
+    exit 0
+}
+
+for o in $@; do
+    [[ $o =~ ^(-h|--help)$ ]] && usage
+    [[ $o =~ ^(-d|--debug)$ ]] && set -x
+done
+
+_options=${@:2}
+parse_common_options $_options
+create_pcsx2_chroot_env $_options
+
+trap - TERM INT HUP EXIT QUIT
