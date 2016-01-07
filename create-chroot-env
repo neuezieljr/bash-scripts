@@ -102,23 +102,39 @@ apt-get install libcanberra-gtk-module --yes
 apt-get install pcsx2-unstable --yes
 EOS
 
-    # Install GFX drivers if we have nvidia or amd graphics
-    while read v d; do
-        [ $v == '1002' ] && \
-            GFX=$(echo $GFX fglrx)
-        [ $v == '10de' ] && \
-            GFX=$(echo $GFX nvidia)
-    done < <(lspci -n | awk '{ if ($2 ~ /^03/) print $3 }' | sed 's/:/ /')
+    while read line; do
+        case "$line" in
+            nvidia-[0-9]*) GFX_DPKG=$line ;;
+            fglrx|fglrx-updates) GFX_DPKG=$(echo $line ${line}-core);;
+        esac
+    done < <(dpkg -l | grep -E "(nvidia|fglrx)" | awk '{print $2}')
 
-    if [ "$GFX" != "" ]; then
-        TMPLIST=$(mktemp -u)
-        ubuntu-drivers list > $TMPLIST
-        for gfx in $GFX; do
-            g=$(cat $TMPLIST | grep $gfx | sort -r | head -1)
-            [ "$g" != "" ] && INSTALL_GFX=$(echo $INSTALL_GFX $g)
-        done
-        schroot -c $PROFILE -u root -- sh -c "export DEBCONF_FRONTEND='noninteractive'; apt-get install $INSTALL_GFX --yes"
-        rm -f $TMPLIST
+    if [[ $GFX_DPKG != '' ]]; then
+        GFX_DPKG_VER=$(dpkg-query -W -f='${Version}\n' $GFX_DPKG | head -1)
+
+        if [[ $GFX_DPKG =~ nvidia.* ]]; then
+            UPALT_OPT="--install /etc/ld.so.conf.d/i386-linux-gnu_GL.conf i386-linux-gnu_gl_conf /usr/lib/${GFX_DPKG}/ld.so.conf 9999 \
+                       --slave /usr/lib/xorg/modules/drivers/nvidia_drv.so i386-linux-gnu_nvidia_drv /usr/lib/${GFX_DPKG}/xorg/nvidia_drv.so \
+                       --slave /usr/lib/i386-linux-gnu/xorg/extra-modules i386-linux-gnu_xorg_extra_modules /usr/lib/${GFX_DPKG}/xorg \
+                       --slave /usr/lib/vdpau/libvdpau_nvidia.so.1 i386-linux-gnu_libvdpau_nvidia.so.1 /usr/lib/${GFX_DPKG}/vdpau/libvdpau_nvidia.so.1 \
+                       --slave /usr/lib/libvdpau_nvidia.so i386-linux-gnu_libvdpau_nvidia.so /usr/lib/${GFX_DPKG}/vdpau/libvdpau_nvidia.so"
+        fi
+
+        if [[ $GFX_DPKG =~ fglrx.* ]]; then
+            UPALT_OPT="--install /etc/ld.so.conf.d/i386-linux-gnu_GL.conf i386-linux-gnu_gl_conf /usr/lib/fglrx/ld.so.conf 9999 \
+                       --slave /usr/lib/xorg/modules/drivers/fglrx_drv.so i386-linux-gnu_fglrx_drv /usr/lib/fglrx/xorg/modules/drivers/fglrx_drv.so \
+                       --slave /usr/lib/i386-linux-gnu/xorg/extra-modules i386-linux-gnu_xorg_extra_modules /usr/lib/fglrx/xorg"
+        fi
+
+        cat << EOS | schroot -c $PROFILE -u root -- sh
+for drv in $GFX_DPKG; do
+  apt-get download \$drv=$GFX_DPKG_VER
+  dpkg -x \${drv}*.deb /
+done
+update-alternatives --force $UPALT_OPT
+ldconfig
+rm -f ${GFX_DPKG}*.deb
+EOS
     fi
 
     sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
@@ -133,8 +149,8 @@ CHROOTDIR=\$(mktemp -d)
 sudo tar -zxp -f $OUTPUT -C \$CHROOTDIR
 
 for dev in /dev/input/event*; do
-    if udevadm info $dev | grep -q ID_INPUT_JOYSTICK; then
-        SDL_JOYSTICK_DEVICE=$dev
+    if udevadm info \$dev | grep -q ID_INPUT_JOYSTICK; then
+        SDL_JOYSTICK_DEVICE=\$dev
         break
     fi
 done
@@ -158,6 +174,7 @@ EOS
 sudo rm -fr \$CHROOTDIR
 sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
 EOF_SH
+   chmod u+x $HOME/run-pcsx2
 }
 
 create_ibs_chroot_env()
