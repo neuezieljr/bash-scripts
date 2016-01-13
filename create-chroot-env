@@ -64,23 +64,30 @@ create_pcsx2_chroot_env()
     ARCH=i386
     OUTPUT=${PROFILE}.tgz
     PPA="ppa:gregory-hainaut/pcsx2.official.ppa"
+    SNAPSHOT=
 
     while [ "$1" ]; do
         case "$1" in
             --daily)
                 echo -e "\nUse PCSX2 Daily PPA: ppa:pcsx2-team/pcsx2-daily\n"
                 PPA="ppa:pcsx2-team/pcsx2-daily"
+                SNAPSHOT="-unstable"
+                ;;
+            --snapshot)
+                SNAPSHOT="-unstable"
+                ;;
         esac 
         shift
     done
 
-    echo '======================='
-    echo 'Create PCSX2 chroot env'
-    echo '     DISTRO =' $DISTRO
-    echo '     ARCH   =' $ARCH
-    echo '     OUTPUT =' $PWD/$OUTPUT
-    echo '  PCSX2 PPA =' $PPA
-    echo '======================='
+    echo '============================'
+    echo '  Create PCSX2 chroot env'
+    echo '       DISTRO =' $DISTRO
+    echo '       ARCH   =' $ARCH
+    echo '       OUTPUT =' $PWD/$OUTPUT
+    echo '    PCSX2 PPA =' $PPA
+    echo '      PACKAGE = pcsx2'$SNAPSHOT
+    echo '============================'
     echo
 
     create_base_chroot_env
@@ -99,7 +106,7 @@ export DEBCONF_FRONTEND='noninteractive'
 add-apt-repository $PPA --yes
 apt-get update
 apt-get install libcanberra-gtk-module --yes
-apt-get install pcsx2-unstable --yes
+apt-get install pcsx2${SNAPSHOT} --yes
 EOS
 
     while read line; do
@@ -129,11 +136,11 @@ EOS
         cat << EOS | schroot -c $PROFILE -u root -- sh
 for drv in $GFX_DPKG; do
   apt-get download \$drv=$GFX_DPKG_VER
-  dpkg -x \${drv}*.deb /
+  dpkg -x \${drv}_*.deb /
+  rm -f \${drv}_*.deb
 done
 update-alternatives --force $UPALT_OPT
 ldconfig
-rm -f ${GFX_DPKG}*.deb
 EOS
     fi
 
@@ -198,12 +205,12 @@ create_ibs_chroot_env()
         shift
     done
 
-    echo '============================='
-    echo 'Create IBS Builder chroot env'
-    echo '  DISTRO =' $DISTRO
-    echo '  ARCH   =' $ARCH
-    echo '  OUTPUT =' $PWD/$OUTPUT
-    echo '============================='
+    echo '================================='
+    echo '  Create IBS Builder chroot env'
+    echo '    DISTRO =' $DISTRO
+    echo '    ARCH   =' $ARCH
+    echo '    OUTPUT =' $PWD/$OUTPUT
+    echo '================================='
     echo
 
     PROFILE=ibs-${DISTRO}-${ARCH}
