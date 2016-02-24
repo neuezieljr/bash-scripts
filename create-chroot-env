@@ -184,12 +184,12 @@ EOF_SH
    chmod u+x $HOME/run-pcsx2
 }
 
-create_ibs_chroot_env()
+create_devel_chroot_env()
 {
-    PROFILE=ibs
-    OUTPUT=${PROFILE}.tgz
     ARCH=amd64
     DISTRO=precise
+
+    parse_common_options $@
 
     while [ "$1" ]; do
         case "$1" in
@@ -205,6 +205,62 @@ create_ibs_chroot_env()
         shift
     done
 
+    PROFILE=devel-${DISTRO}-${ARCH}
+    OUTPUT=${PROFILE}.tgz
+
+    echo '================================='
+    echo '  Create DEVELOP chroot env'
+    echo '    DISTRO =' $DISTRO
+    echo '    ARCH   =' $ARCH
+    echo '    OUTPUT =' $PWD/$OUTPUT
+    echo '================================='
+    echo
+
+    create_base_chroot_env
+
+    cat << EOF_CONF | sudo tee /etc/schroot/chroot.d/${PROFILE}.conf
+[$PROFILE]
+description=Ubuntu $PROFILE IBS Build env
+directory=$CHROOTDIR
+root-users=$USER
+type=directory
+users=$USER
+EOF_CONF
+
+    cat << EOS | schroot -c $PROFILE -u root -- sh
+apt-get install apt-transport-https apt-utils mtools less vim --yes
+EOS
+    sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
+    sudo tar -czp --numeric-owner -f $OUTPUT -C $CHROOTDIR .
+    sudo chown $USER $OUTPUT
+    sudo rm -fr $CHROOTDIR
+}
+
+create_ibs_chroot_env()
+{
+    PROFILE=ibs
+    ARCH=amd64
+    DISTRO=precise
+
+    parse_common_options $@
+
+    while [ "$1" ]; do
+        case "$1" in
+            --ppa)
+                shift
+                OEM_SOLUTIONS_CDIMAGE_PPA=$1
+                ;;
+            --ppa-key)
+                shift
+                OEM_SOLUTIONS_CDIMAGE_KEY=$1
+                ;;
+        esac
+        shift
+    done
+
+    PROFILE=ibs-${DISTRO}-${ARCH}
+    OUTPUT=${PROFILE}.tgz
+
     echo '================================='
     echo '  Create IBS Builder chroot env'
     echo '    DISTRO =' $DISTRO
@@ -212,9 +268,6 @@ create_ibs_chroot_env()
     echo '    OUTPUT =' $PWD/$OUTPUT
     echo '================================='
     echo
-
-    PROFILE=ibs-${DISTRO}-${ARCH}
-    OUTPUT=${PROFILE}.tgz
 
     create_base_chroot_env
 
@@ -248,10 +301,10 @@ $(echo $OEM_SOLUTIONS_CDIMAGE_PPA)
 EOF_PPA
 
     cat << EOS | schroot -c $PROFILE -u root -- sh
-apt-get install apt-transport-https apt-utils mtools --yes
+apt-get install apt-transport-https apt-utils mtools less --yes
 apt-key adv --keyserver keyserver.ubuntu.com --recv $OEM_SOLUTIONS_CDIMAGE_KEY
 apt-get update
-apt-get install live-build=2.0.12-2cesg27-0~1625~ubuntu12.04.1 --yes
+apt-get install live-build=\$(apt-cache policy live-build | grep ^[[:space:]]*2.0 | awk '{print \$1}') --yes
 EOS
     sudo rm -f /etc/schroot/chroot.d/${PROFILE}.conf
     sudo tar -czp --numeric-owner -f $OUTPUT -C $CHROOTDIR .
